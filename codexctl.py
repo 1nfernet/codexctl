@@ -15,6 +15,9 @@ import time
 
 DEFAULT_SOCK = "~/.codex/app-server-control/app-server-control.sock"
 SANDBOXES = ["read-only", "workspace-write", "danger-full-access"]
+DEFAULT_SANDBOX = "workspace-write"
+DEFAULT_APPROVAL_POLICY = "on-request"
+DEFAULT_APPROVALS_REVIEWER = "auto_review"
 # thread/start and thread/resume take the mode; turn/start and responses use the policy object.
 POLICY_TYPES = {"read-only": "readOnly", "workspace-write": "workspaceWrite",
                 "danger-full-access": "dangerFullAccess"}
@@ -190,6 +193,7 @@ def resume(c, thread_id):
     if saved.get("sandbox"):
         params["sandbox"] = saved["sandbox"]
         params["approvalPolicy"] = saved["approvalPolicy"]
+        params["approvalsReviewer"] = saved.get("approvalsReviewer", DEFAULT_APPROVALS_REVIEWER)
     r = c.call("thread/resume", params)
     got = (r.get("sandbox") or {}).get("type")
     if saved.get("sandbox") and got != POLICY_TYPES[saved["sandbox"]]:
@@ -202,6 +206,7 @@ def pinned_permissions(thread_id):
     if not saved.get("sandbox"):
         return {}
     return {"approvalPolicy": saved["approvalPolicy"],
+            "approvalsReviewer": saved.get("approvalsReviewer", DEFAULT_APPROVALS_REVIEWER),
             "sandboxPolicy": saved.get("sandboxPolicy") or {"type": POLICY_TYPES[saved["sandbox"]]}}
 
 
@@ -220,6 +225,7 @@ def last_turn_sandbox(path):
     if not last:
         return None
     return {"turnId": last.get("turn_id"), "approvalPolicy": last.get("approval_policy"),
+            "approvalsReviewer": last.get("approvals_reviewer"),
             "sandbox": last.get("sandbox_policy")}
 
 
@@ -251,7 +257,8 @@ def turn_overrides(a):
 
 
 def new_thread(c, a, extra_config=None):
-    params = {"approvalPolicy": "never", "sandbox": a.sandbox, "cwd": os.path.abspath(a.cwd)}
+    params = {"approvalPolicy": a.ask_for_approval, "approvalsReviewer": a.approvals_reviewer,
+              "sandbox": a.sandbox, "cwd": os.path.abspath(a.cwd)}
     if a.model:
         params["model"] = a.model
     if a.tier:
@@ -267,7 +274,8 @@ def new_thread(c, a, extra_config=None):
     r = c.call("thread/start", params)
     tid = r["thread"]["id"]
     # Record permissions so later turns and reloads keep them (see `resume` and `pinned_permissions`).
-    save_thread(tid, sandbox=a.sandbox, sandboxPolicy=r.get("sandbox"), approvalPolicy="never",
+    save_thread(tid, sandbox=a.sandbox, sandboxPolicy=r.get("sandbox"),
+                approvalPolicy=a.ask_for_approval, approvalsReviewer=a.approvals_reviewer,
                 **({"config": overrides} if overrides else {}))
     if a.name:
         c.call("thread/name/set", {"threadId": tid, "name": a.name})
@@ -277,7 +285,8 @@ def new_thread(c, a, extra_config=None):
 def thread_info(r, tid, effort):
     return {"threadId": tid, "model": r.get("model"), "effort": effort or r.get("reasoningEffort"),
             "serviceTier": r.get("serviceTier"), "sandbox": r.get("sandbox"),
-            "approvalPolicy": r.get("approvalPolicy"), "cwd": r.get("cwd")}
+            "approvalPolicy": r.get("approvalPolicy"), "approvalsReviewer": r.get("approvalsReviewer"),
+            "cwd": r.get("cwd")}
 
 
 def cmd_review(a):
@@ -328,6 +337,8 @@ def cmd_status(a):
     return {"threadId": a.thread, "name": th.get("name"), "threadStatus": th.get("status"),
             "model": th.get("model"), "cwd": th.get("cwd"),
             "pinnedSandbox": load_state().get(a.thread, {}).get("sandbox"),
+            "pinnedApprovalPolicy": load_state().get(a.thread, {}).get("approvalPolicy"),
+            "pinnedApprovalsReviewer": load_state().get(a.thread, {}).get("approvalsReviewer"),
             "lastTurnPermissions": last_turn_sandbox(th.get("path")),
             "activeTurnId": last.get("id") if last.get("status") == "inProgress" else None,
             "lastTurn": {k: last.get(k) for k in ("id", "status", "error", "durationMs")} if last else None,
@@ -472,9 +483,14 @@ def cmd_steer(a):
 
 def cmd_queue(a):
     c = Client()
-    if a.sandbox:
-        save_thread(a.thread, sandbox=a.sandbox, sandboxPolicy={"type": POLICY_TYPES[a.sandbox]},
-                    approvalPolicy="never")
+    saved = load_state().get(a.thread, {})
+    sandbox = a.sandbox or saved.get("sandbox") or DEFAULT_SANDBOX
+    policy = a.ask_for_approval or saved.get("approvalPolicy") or DEFAULT_APPROVAL_POLICY
+    reviewer = a.approvals_reviewer or saved.get("approvalsReviewer") or DEFAULT_APPROVALS_REVIEWER
+    save_thread(a.thread, sandbox=sandbox,
+                sandboxPolicy=({"type": POLICY_TYPES[sandbox]} if a.sandbox or not saved.get("sandbox")
+                               else saved.get("sandboxPolicy") or {"type": POLICY_TYPES[sandbox]}),
+                approvalPolicy=policy, approvalsReviewer=reviewer)
     ensure_loaded(c, a.thread)
     deadline = time.time() + a.wait
     while active_turn_id(c, a.thread):
@@ -483,11 +499,8 @@ def cmd_queue(a):
         time.sleep(5)
     pinned = pinned_permissions(a.thread)
     tr = c.call("turn/start", {"threadId": a.thread, "input": text_input(a.message), **turn_overrides(a), **pinned})
-    out = {"queued": True, "turnId": tr["turn"]["id"], "sandbox": load_state().get(a.thread, {}).get("sandbox")}
-    if not pinned:
-        out["note"] = ("codexctl has no recorded sandbox for this thread, so the daemon's default applies; "
-                       "pass --sandbox to pin one")
-    return out
+    return {"queued": True, "turnId": tr["turn"]["id"], "sandbox": sandbox,
+            "approvalPolicy": policy, "approvalsReviewer": reviewer}
 
 
 def cmd_stop(a):
@@ -548,16 +561,23 @@ def build_parser():
 
     def add_thread_flags(s, sandbox, tier=None):
         add_turn_flags(s, tier)
+        add_permission_flags(s, DEFAULT_APPROVAL_POLICY, DEFAULT_APPROVALS_REVIEWER)
         s.add_argument("--cwd", default=os.getcwd(), help="working directory (default: current)")
         s.add_argument("--name", help="thread name shown in Codex history")
         s.add_argument("--sandbox", default=sandbox, choices=SANDBOXES,
-                       help=f"default: {sandbox} (approvals are always `never`)")
+                       help=f"default: {sandbox}")
         s.add_argument("-c", "--config", action="append", metavar="KEY=VALUE",
                        help="Codex config override, dotted keys allowed; VALUE is parsed as JSON, else string")
 
+    def add_permission_flags(s, policy=None, reviewer=None):
+        s.add_argument("--ask-for-approval", default=policy, choices=["on-request", "never"],
+                       help="approval policy (default: " + (policy or "recorded policy, else on-request") + ")")
+        s.add_argument("--approvals-reviewer", default=reviewer, choices=["auto_review", "user"],
+                       help="approval reviewer (default: " + (reviewer or "recorded reviewer, else auto_review") + ")")
+
     s = add("start", cmd_start, "start a new session and its first turn; returns immediately unless --wait")
     s.add_argument("prompt", help="prompt text, or - to read it from stdin")
-    add_thread_flags(s, "danger-full-access")
+    add_thread_flags(s, DEFAULT_SANDBOX)
     s.add_argument("--summary", help="reasoning summary mode, e.g. auto, concise, detailed, none")
     s.add_argument("--wait", type=int, metavar="SECONDS",
                    help="block until the turn ends (up to SECONDS) and print a compact result; "
@@ -571,7 +591,7 @@ def build_parser():
     g.add_argument("--commit", metavar="SHA", help="review the changes introduced by one commit")
     g.add_argument("--instructions", help="custom review instructions")
     s.add_argument("--wait", type=int, default=3600, help="max seconds to wait for the review (default 3600)")
-    add_thread_flags(s, "danger-full-access", tier="default")
+    add_thread_flags(s, DEFAULT_SANDBOX, tier="default")
 
     s = add("status", cmd_status, "thread state and the latest persisted items")
     s.add_argument("thread")
@@ -604,7 +624,8 @@ def build_parser():
     s.add_argument("message")
     s.add_argument("--wait", type=int, default=3600, help="max seconds to wait (default 3600)")
     s.add_argument("--sandbox", choices=SANDBOXES,
-                   help="re-pin the thread's sandbox for this and later turns (default: the one recorded at start)")
+                   help="re-pin the thread's sandbox (default: recorded sandbox, else workspace-write)")
+    add_permission_flags(s)
     add_turn_flags(s)
 
     s = add("stop", cmd_stop, "interrupt the active turn")

@@ -51,7 +51,7 @@ codexctl archive <threadId>
 codexctl review --base main --model gpt-6-sol --effort high   # built-in review; waits and prints it
 ```
 
-`review` runs Codex's built-in code reviewer in a new session. The target is uncommitted changes by default, or pass one of `--base BRANCH`, `--commit SHA`, or `--instructions TEXT`. It accepts the same model, effort, tier, cwd, name, sandbox, and `-c` options as `start`. Its sandbox defaults to `danger-full-access`, and it explicitly requests tier `default` (standard speed), overriding the configured service tier. Pass `--sandbox` or `--tier` to override these defaults, such as `--sandbox read-only` for inspection or `--tier priority` for Fast mode. Unlike `start`, it waits for the review and prints the review text, up to `--wait` seconds (default 3600). The daemon interrupts a review as soon as its client disconnects, so run long reviews in the background instead of killing `codexctl`.
+`review` runs Codex's built-in code reviewer in a new session. The target is uncommitted changes by default, or pass one of `--base BRANCH`, `--commit SHA`, or `--instructions TEXT`. It accepts the same model, effort, tier, cwd, name, sandbox, and `-c` options as `start`. Its permissions default to Approve for me (`workspace-write`, approvals `on-request`, reviewer `auto_review`), and it explicitly requests tier `default` (standard speed), overriding the configured service tier. Pass `--sandbox` or `--tier` to override these defaults, such as `--sandbox read-only` for inspection or `--tier priority` for Fast mode. Unlike `start`, it waits for the review and prints the review text, up to `--wait` seconds (default 3600). The daemon interrupts a review as soon as its client disconnects, so run long reviews in the background instead of killing `codexctl`.
 
 `wait` blocks until the thread's active turn ends, then prints a compact result: turn status, the final agent message, the command count, the number of failed commands with the last five of them (output clipped), and the changed files. If no turn is active, it returns that result for the last turn at once. `start --wait SECONDS` does the same right after starting. Unlike `review`, a turn keeps running if `codexctl` exits or times out, so it's safe to run `wait` again.
 
@@ -66,7 +66,9 @@ Waiting doesn't need a model. Run `codexctl start ... --wait 7200` (or `codexctl
 | `--model` | Model id from `codexctl models` |
 | `--effort` | Reasoning effort supported by the model |
 | `--tier` | `priority` for Fast mode, `default` for standard speed |
-| `--sandbox` | `read-only`, `workspace-write`, or `danger-full-access` (default) |
+| `--sandbox` | `read-only`, `workspace-write` (default), or `danger-full-access` |
+| `--ask-for-approval` | `on-request` (default) or `never` |
+| `--approvals-reviewer` | `auto_review` (default) or `user` |
 | `--cwd` | Working directory for the session (default: current directory) |
 | `--name` | Thread name shown in Codex history |
 | `-c KEY=VALUE` | Codex config override; dotted keys work, and `VALUE` is parsed as JSON, falling back to a plain string |
@@ -77,11 +79,11 @@ Sessions run on the shared daemon, so they keep running after `codexctl` exits. 
 
 ## Behavior to know
 
-- **Full access by default.** `start` and `review` use the `danger-full-access` sandbox with approvals set to `never`, so Codex can change files, git state, and remote hosts without asking. Pass `--sandbox read-only` for inspection.
+- **Approve for me by default.** `start` and `review` use `workspace-write`, approvals `on-request`, and reviewer `auto_review`. Routine workspace actions run inside the sandbox; eligible approval requests go to the daemon's automatic reviewer. Override these independently with `--sandbox`, `--ask-for-approval`, and `--approvals-reviewer`. For full access, pass `--sandbox danger-full-access --ask-for-approval never`.
 - **Interrupting doesn't end commands.** `stop` interrupts the turn, but processes Codex already started keep running. `stop --kill-processes` ends them by archiving and then unarchiving the thread. The daemon ends a thread's processes when it is archived, and the thread stays usable afterwards.
 - **In-progress items.** `status` reads persisted history, which may not include items from a turn that is still running. Use `watch` for live progress.
-- **Permissions stay pinned.** The daemon unloads idle threads, and `stop --kill-processes` unloads one too. On reload it keeps model, effort, and tier, but the sandbox, approval policy, and `-c` overrides fall back to `config.toml` defaults, so a full-access thread can come back read-only or workspace-write with no network. `codexctl` records each thread's sandbox, approval policy, and overrides in `~/.local/state/codexctl/threads.json` when it starts the thread. It passes them again when it reloads the thread, and it pins the sandbox and approvals on every turn it starts, so a change made by another client, such as `codex resume` or Codex Desktop, doesn't carry into `codexctl` turns. If a reload comes back with a different sandbox, `codexctl` exits with an error and doesn't start the turn. Other clients don't apply this state. For a thread `codexctl` didn't start, `queue` warns that the daemon default applies; pass `--sandbox` to pin one. `status` shows the pinned sandbox and the permissions the last turn actually ran with.
-- **Server requests go unanswered.** With approvals set to `never`, the daemon rarely asks clients anything. If it does, for example a user-input request, `watch` reports it as a `serverRequest` event and `codexctl` doesn't answer it.
+- **Permissions stay pinned.** `codexctl` records each thread's sandbox, approval policy, reviewer, and `-c` overrides in `~/.local/state/codexctl/threads.json`. It reapplies them when it reloads a thread and pins all three permission settings on every turn it starts. `queue` preserves recorded settings, including older full-access threads; for an untracked thread it records the Approve for me defaults. `queue --sandbox`, `--ask-for-approval`, and `--approvals-reviewer` update the corresponding settings for this and later turns. If a reload returns a different sandbox, no turn starts. Other clients don't apply this saved state. `status` reports pinned settings and `lastTurnPermissions` from the saved rollout.
+- **Client requests go unanswered.** The daemon handles eligible approvals through Auto-review. Requests that still require a person, including approval requests when using reviewer `user`, are reported as `serverRequest` events; `codexctl` cannot answer them. Automatic review can deny an action, and permissions don't guarantee that a build or test will run.
 - **Socket path.** The default is `~/.codex/app-server-control/app-server-control.sock`. Override it with `CODEXCTL_SOCK`.
 
 ## Protocol reference

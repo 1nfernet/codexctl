@@ -143,9 +143,9 @@ class OverridePersistenceTest(unittest.TestCase):
         def handler(msg):
             m = msg["method"]
             if m == "thread/start":
-                yield reply(msg, {"thread": {"id": "t1"}, "model": "m", "sandbox": {"type": "dangerFullAccess"}})
+                yield reply(msg, {"thread": {"id": "t1"}, "model": "m", "sandbox": {"type": "workspaceWrite"}})
             elif m == "thread/resume":
-                yield reply(msg, {"sandbox": {"type": "dangerFullAccess"}})
+                yield reply(msg, {"sandbox": {"type": "workspaceWrite"}})
             elif m == "turn/start":
                 yield reply(msg, {"turn": {"id": "u1"}})
             elif m == "thread/read":
@@ -166,14 +166,17 @@ class OverridePersistenceTest(unittest.TestCase):
             resumes = [r for r in d.requests if r.get("method") == "thread/resume"]
             self.assertEqual(resumes[0]["params"]["config"], {"a.b": "x", "n": 3})
             start = next(r for r in d.requests if r.get("method") == "thread/start")
-            self.assertEqual(start["params"]["sandbox"], "danger-full-access")
-            self.assertEqual(start["params"]["approvalPolicy"], "never")
-            self.assertEqual(resumes[0]["params"]["sandbox"], "danger-full-access")
-            self.assertEqual(resumes[0]["params"]["approvalPolicy"], "never")
+            self.assertEqual(start["params"]["sandbox"], "workspace-write")
+            self.assertEqual(start["params"]["approvalPolicy"], "on-request")
+            self.assertEqual(start["params"]["approvalsReviewer"], "auto_review")
+            self.assertEqual(resumes[0]["params"]["sandbox"], "workspace-write")
+            self.assertEqual(resumes[0]["params"]["approvalPolicy"], "on-request")
+            self.assertEqual(resumes[0]["params"]["approvalsReviewer"], "auto_review")
             turns = [r["params"] for r in d.requests if r.get("method") == "turn/start"]
             for tp in turns:
-                self.assertEqual(tp["sandboxPolicy"], {"type": "dangerFullAccess"})
-                self.assertEqual(tp["approvalPolicy"], "never")
+                self.assertEqual(tp["sandboxPolicy"], {"type": "workspaceWrite"})
+                self.assertEqual(tp["approvalPolicy"], "on-request")
+                self.assertEqual(tp["approvalsReviewer"], "auto_review")
 
 
 class PermissionPinningTest(unittest.TestCase):
@@ -188,7 +191,10 @@ class PermissionPinningTest(unittest.TestCase):
         def handler(msg):
             m = msg["method"]
             if m == "thread/start":
-                yield reply(msg, {"thread": {"id": "t1"}, "sandbox": {"type": "workspaceWrite", "networkAccess": True}})
+                sandbox = {"type": codexctl.POLICY_TYPES[msg["params"]["sandbox"]]}
+                if sandbox["type"] == "workspaceWrite":
+                    sandbox["networkAccess"] = True
+                yield reply(msg, {"thread": {"id": "t1"}, "sandbox": sandbox})
             elif m == "thread/resume":
                 yield reply(msg, {"sandbox": resume_sandbox})
             elif m == "turn/start":
@@ -218,19 +224,62 @@ class PermissionPinningTest(unittest.TestCase):
         tp = [r["params"] for r in d.requests if r.get("method") == "turn/start"][-1]
         self.assertEqual(tp["sandboxPolicy"], {"type": "workspaceWrite", "networkAccess": True})
 
-    def test_untracked_thread_is_flagged_and_can_be_pinned(self):
-        d = self.daemon({"type": "dangerFullAccess"})
+    def test_untracked_thread_gets_auto_review_defaults(self):
+        d = self.daemon({"type": "workspaceWrite"})
         out = FramingTest().run_cli(d, "queue", "other", "go")
-        self.assertIn("no recorded sandbox", out["note"])
-        tp = [r["params"] for r in d.requests if r.get("method") == "turn/start"][-1]
-        self.assertNotIn("sandboxPolicy", tp)
-        out = FramingTest().run_cli(d, "queue", "other", "go", "--sandbox", "danger-full-access")
         d.close()
-        self.assertNotIn("note", out)
+        self.assertEqual(out["sandbox"], "workspace-write")
+        self.assertEqual(out["approvalPolicy"], "on-request")
+        self.assertEqual(out["approvalsReviewer"], "auto_review")
         resume = [r["params"] for r in d.requests if r.get("method") == "thread/resume"][-1]
-        self.assertEqual(resume["sandbox"], "danger-full-access")
+        self.assertEqual(resume["sandbox"], "workspace-write")
+        self.assertEqual(resume["approvalPolicy"], "on-request")
+        self.assertEqual(resume["approvalsReviewer"], "auto_review")
+        tp = [r["params"] for r in d.requests if r.get("method") == "turn/start"][-1]
+        self.assertEqual(tp["sandboxPolicy"], {"type": "workspaceWrite"})
+        self.assertEqual(tp["approvalPolicy"], "on-request")
+        self.assertEqual(tp["approvalsReviewer"], "auto_review")
+
+    def test_explicit_permission_overrides_survive_queue_and_reload(self):
+        d = self.daemon({"type": "dangerFullAccess"})
+        t = FramingTest()
+        t.run_cli(d, "start", "hi", "--sandbox", "danger-full-access",
+                  "--ask-for-approval", "never", "--approvals-reviewer", "user")
+        out = t.run_cli(d, "queue", "t1", "go")
+        d.close()
+        self.assertEqual(out["approvalPolicy"], "never")
+        self.assertEqual(out["approvalsReviewer"], "user")
+        start = next(r["params"] for r in d.requests if r.get("method") == "thread/start")
+        self.assertEqual(start["approvalPolicy"], "never")
+        self.assertEqual(start["approvalsReviewer"], "user")
+        resume = next(r["params"] for r in d.requests if r.get("method") == "thread/resume")
+        self.assertEqual(resume["approvalPolicy"], "never")
+        self.assertEqual(resume["approvalsReviewer"], "user")
         tp = [r["params"] for r in d.requests if r.get("method") == "turn/start"][-1]
         self.assertEqual(tp["sandboxPolicy"], {"type": "dangerFullAccess"})
+        self.assertEqual(tp["approvalPolicy"], "never")
+        self.assertEqual(tp["approvalsReviewer"], "user")
+
+    def test_queue_permission_overrides_are_persisted_for_later_turns(self):
+        d = self.daemon({"type": "workspaceWrite"}, loaded=True)
+        t = FramingTest()
+        t.run_cli(d, "queue", "other", "go", "--sandbox", "read-only",
+                  "--ask-for-approval", "never", "--approvals-reviewer", "user")
+        t.run_cli(d, "queue", "other", "again")
+        d.close()
+        for tp in (r["params"] for r in d.requests if r.get("method") == "turn/start"):
+            self.assertEqual(tp["sandboxPolicy"], {"type": "readOnly"})
+            self.assertEqual(tp["approvalPolicy"], "never")
+            self.assertEqual(tp["approvalsReviewer"], "user")
+
+    def test_legacy_saved_permissions_remain_pinned(self):
+        codexctl.save_thread("legacy", sandbox="danger-full-access",
+                             sandboxPolicy={"type": "dangerFullAccess"}, approvalPolicy="never")
+        d = self.daemon({"type": "dangerFullAccess"})
+        out = FramingTest().run_cli(d, "queue", "legacy", "go")
+        d.close()
+        self.assertEqual(out["sandbox"], "danger-full-access")
+        self.assertEqual(out["approvalPolicy"], "never")
 
 
 class ReviewTest(unittest.TestCase):
@@ -264,9 +313,10 @@ class ReviewTest(unittest.TestCase):
         self.assertTrue(out["finished"])
         self.assertEqual(out["review"], "no findings")
         start = next(r for r in d.requests if r.get("method") == "thread/start")
-        self.assertEqual(start["params"]["sandbox"], "danger-full-access")
+        self.assertEqual(start["params"]["sandbox"], "workspace-write")
         self.assertEqual(start["params"]["serviceTier"], "default")
-        self.assertEqual(start["params"]["approvalPolicy"], "never")
+        self.assertEqual(start["params"]["approvalPolicy"], "on-request")
+        self.assertEqual(start["params"]["approvalsReviewer"], "auto_review")
         self.assertEqual(start["params"]["config"], {"model_reasoning_effort": "high"})
         review = next(r for r in d.requests if r.get("method") == "review/start")
         self.assertEqual(review["params"]["target"], {"type": "baseBranch", "branch": "main"})
@@ -300,7 +350,8 @@ class ReviewTest(unittest.TestCase):
                     start = next(r for r in d.requests if r.get("method") == "thread/start")
                     self.assertEqual(start["params"]["sandbox"], sandbox)
                     self.assertEqual(start["params"]["serviceTier"], "priority")
-                    self.assertEqual(start["params"]["approvalPolicy"], "never")
+                    self.assertEqual(start["params"]["approvalPolicy"], "on-request")
+                    self.assertEqual(start["params"]["approvalsReviewer"], "auto_review")
 
 
 class WaitTest(unittest.TestCase):
