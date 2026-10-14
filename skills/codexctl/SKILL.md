@@ -12,7 +12,7 @@ Use `codexctl` to operate sessions on the local Codex app-server daemon. Each co
 - Check `codexctl --help` and the relevant subcommand's `--help` when options are uncertain. The CLI requires Python 3.9+ and a running Codex app-server daemon. If the daemon is unavailable, report the connection error; `codex app-server daemon start` starts it when needed for the requested work. `CODEXCTL_SOCK` overrides the default socket.
 - Preserve the user's model, effort, tier, cwd, sandbox, and configuration choices. Use `codexctl models` to resolve model IDs and supported efforts instead of hardcoding a preferred model. Omit unspecified model, effort, and tier flags to use defaults.
 - Set `--cwd` to the intended repository. Put the user's constraints at the top of the delegated prompt, including edit boundaries and restrictions on commits, pushes, PRs, publishing, and remote actions. Delegation does not grant additional authorization.
-- `start` defaults to `danger-full-access` with approvals set to `never`. Choose a sandbox appropriate to the authorized work: `read-only` for inspection, `workspace-write` for repository edits or tests. Never widen an explicitly requested sandbox to work around a failure.
+- `start` and `review` default to `danger-full-access` with approvals set to `never`. Choose a sandbox appropriate to the authorized work: `read-only` for inspection, `workspace-write` for repository edits or tests. Never widen an explicitly requested sandbox to work around a failure.
 - Only steer, queue work on, stop, or archive a thread the user identified or that you started for this task. Use `list` to resolve an ambiguous target before changing it.
 
 ## Start and collect results
@@ -60,7 +60,7 @@ codexctl review --cwd /path/to/repo --base main --wait 3600
 
 The default target is uncommitted changes. Choose at most one of `--base BRANCH`, `--commit SHA`, or `--instructions TEXT`. Review accepts the same model, effort, tier, cwd, name, sandbox, and `-c KEY=VALUE` options as `start`.
 
-Review defaults to `read-only`; use `workspace-write` when authorized tests need writable temporary files. Run long reviews through background execution and keep the command alive: unlike ordinary turns, a review is interrupted when its client disconnects, including when `--wait` expires. Do not describe a timed-out review as continuing in the background. A completed review returns its text in `review`.
+Review defaults to `danger-full-access` and explicitly requests tier `default` (standard speed), overriding the configured service tier. Preserve explicit `--sandbox` and `--tier` choices; `--tier priority` selects Fast mode. Run long reviews through background execution and keep the command alive: unlike ordinary turns, a review is interrupted when its client disconnects, including when `--wait` expires. Do not describe a timed-out review as continuing in the background. A completed review returns its text in `review`.
 
 ## Stop and configuration behavior
 

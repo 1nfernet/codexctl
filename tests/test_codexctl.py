@@ -264,10 +264,43 @@ class ReviewTest(unittest.TestCase):
         self.assertTrue(out["finished"])
         self.assertEqual(out["review"], "no findings")
         start = next(r for r in d.requests if r.get("method") == "thread/start")
-        self.assertEqual(start["params"]["sandbox"], "read-only")
+        self.assertEqual(start["params"]["sandbox"], "danger-full-access")
+        self.assertEqual(start["params"]["serviceTier"], "default")
+        self.assertEqual(start["params"]["approvalPolicy"], "never")
         self.assertEqual(start["params"]["config"], {"model_reasoning_effort": "high"})
         review = next(r for r in d.requests if r.get("method") == "review/start")
         self.assertEqual(review["params"]["target"], {"type": "baseBranch", "branch": "main"})
+
+    def test_review_sandbox_and_tier_overrides_reach_daemon(self):
+        def handler(msg):
+            m = msg["method"]
+            if m == "thread/start":
+                yield reply(msg, {"thread": {"id": "t1"}, "model": "m"})
+            elif m == "review/start":
+                yield reply(msg, {"reviewThreadId": "t1", "turn": {"id": "r1"}})
+                yield server_frame(0x1, json.dumps({"method": "turn/completed", "params": {
+                    "threadId": "t1", "turn": {"id": "r1", "status": "completed"}}}).encode())
+            elif m == "thread/turns/list":
+                yield reply(msg, {"data": [{"id": "r1", "status": "completed", "items": [
+                    {"type": "agentMessage", "text": "no findings"}]}]})
+            else:
+                yield reply(msg, {})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["XDG_STATE_HOME"] = tmp
+            for sandbox in ("read-only", "workspace-write"):
+                with self.subTest(sandbox=sandbox):
+                    d = FakeDaemon(handler)
+                    try:
+                        out = FramingTest().run_cli(d, "review", "--sandbox", sandbox,
+                                                   "--tier", "priority", "--wait", "5")
+                    finally:
+                        d.close()
+                    self.assertTrue(out["finished"])
+                    start = next(r for r in d.requests if r.get("method") == "thread/start")
+                    self.assertEqual(start["params"]["sandbox"], sandbox)
+                    self.assertEqual(start["params"]["serviceTier"], "priority")
+                    self.assertEqual(start["params"]["approvalPolicy"], "never")
 
 
 class WaitTest(unittest.TestCase):

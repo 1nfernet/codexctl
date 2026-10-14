@@ -539,13 +539,15 @@ def build_parser():
         s.set_defaults(fn=fn)
         return s
 
-    def add_turn_flags(s):
+    def add_turn_flags(s, tier=None):
         s.add_argument("--model", help="model id, see `models`")
         s.add_argument("--effort", help="reasoning effort, see `models`")
-        s.add_argument("--tier", help="service tier: `priority` (Fast) or `default`")
+        s.add_argument("--tier", default=tier,
+                       help="service tier: `priority` (Fast) or `default`" +
+                            (f" (default: {tier})" if tier else ""))
 
-    def add_thread_flags(s, sandbox):
-        add_turn_flags(s)
+    def add_thread_flags(s, sandbox, tier=None):
+        add_turn_flags(s, tier)
         s.add_argument("--cwd", default=os.getcwd(), help="working directory (default: current)")
         s.add_argument("--name", help="thread name shown in Codex history")
         s.add_argument("--sandbox", default=sandbox, choices=SANDBOXES,
@@ -569,7 +571,7 @@ def build_parser():
     g.add_argument("--commit", metavar="SHA", help="review the changes introduced by one commit")
     g.add_argument("--instructions", help="custom review instructions")
     s.add_argument("--wait", type=int, default=3600, help="max seconds to wait for the review (default 3600)")
-    add_thread_flags(s, "read-only")
+    add_thread_flags(s, "danger-full-access", tier="default")
 
     s = add("status", cmd_status, "thread state and the latest persisted items")
     s.add_argument("thread")
